@@ -3,7 +3,7 @@
 
   check_app.py <kit> <app>
 
-The app's manifest (the main rules of Yaykit's contract; the review checks it against the contract itself), its version
+The app's manifest (the main rules of Tikpal's contract; the review checks it against the contract itself), its version
 and project name, the kit untouched at a version, everything committed, the release build there and of this version,
 without development commands and at most 3.5 MB, the host tests, and nothing in the repository that looks like a key,
 a token or a round screen's id. Standard library only: it runs before ESP-IDF is installed too.
@@ -16,6 +16,7 @@ import subprocess
 import sys
 
 SLOT_MAX = 3670016
+RESERVED = {"yay", "launcher", "recovery", "template", "system"}
 SCENES = {"party", "learning", "relax", "language", "focus", "tools"}
 AUDIENCES = {"kids", "adults", "all"}
 LANGS = {"zh", "en", "ja", "es-419"}
@@ -75,8 +76,9 @@ def check_manifest(spec, kit):
     for key in sorted(REQUIRED - set(spec)):
         bad(f"app.json 少了 {key}")
     slug = spec.get("slug", "")
-    if not re.match(r"^[a-z][a-z0-9-]{1,40}$", str(slug)) or slug in {"yay", "launcher", "recovery"}:
-        bad("app.json 的 slug 只用小写字母、数字、连字符，字母开头，2–41 个字符，不能是 yay、launcher、recovery")
+    # 24 at most: the image's project name yaykit_<slug> is cut at 31 characters (the kit's `new`, docs/app-json.md).
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,23}", str(slug)) or slug in RESERVED:
+        bad("app.json 的 slug 只用小写字母、数字、连字符，字母开头，2–24 个字符，不能是 " + "、".join(sorted(RESERVED)))
     if spec.get("kind") != "extension":
         bad('app.json 的 kind 要写 "extension"')
     if not re.match(r"^\d{1,4}\.\d{1,4}\.\d{1,4}$", str(spec.get("version", ""))):

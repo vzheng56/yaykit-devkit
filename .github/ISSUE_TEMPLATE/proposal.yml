@@ -8,7 +8,7 @@ body:
       value: 这张单是公开的，不要贴账号、手机号、邮箱、令牌、设备编号。
   - type: input
     id: slug
-    attributes: {label: slug, description: 小写字母、数字和连字符，字母开头；定了就不改。我们会先查有没有重名, placeholder: my-timer}
+    attributes: {label: slug, description: 小写字母、数字和连字符，字母开头，2–24 个字符；定了就不改。我们会先查有没有重名, placeholder: my-timer}
     validations: {required: true}
   - type: input
     id: names

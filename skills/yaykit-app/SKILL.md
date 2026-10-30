@@ -1,11 +1,11 @@
 ---
 name: yaykit-app
-description: 用 Yaykit 开发包做 Yay 圆屏应用（扩展固件）的规矩和做法。在这个应用仓库里写代码、改界面、加功能、编译、写进测试圆屏、看日志和内存、自测、准备提交单时使用。Use for any work in a Yaykit app repository made by `kit new`: the round screen extension's code, UI, side key, launch parameters and results, cloud calls, building with ./kit, installing over USB, self-testing and submitting.
+description: tikpal-app 的旧名字，内容一样，开发包 1.4 起留一版。用 Tikpal 开发包做 Tikpal Voice 应用（扩展固件）的规矩和做法。在这个应用仓库里写代码、改界面、加功能、编译、写进测试圆屏、看日志和内存、自测、准备提交单时使用。Use for any work in a Tikpal app repository made by `kit new`: the round screen extension's code, UI, side key, launch parameters and results, cloud calls, building with ./kit, installing over USB, self-testing and submitting.
 ---
 
-# Yaykit 应用
+# Tikpal 应用
 
-这个仓库是一个 Yay 圆屏应用（扩展固件）：装在圆屏的位置 2 或 3，由 Yay 打开；用户双击侧键开应用环、点中间回到 Yay。同一时间圆屏上只跑一个固件，打开和回去都是重启。
+这个仓库是一个 Tikpal Voice 应用（扩展固件）：装在圆屏的位置 2 或 3，由 Yay 打开；用户双击侧键开应用环、点中间回到 Yay。同一时间圆屏上只跑一个固件，打开和回去都是重启。
 
 ## 先读（按需要）
 
@@ -14,13 +14,30 @@ description: 用 Yaykit 开发包做 Yay 圆屏应用（扩展固件）的规矩
 | 任何开发 | `devkit/docs/app-guide.md`（资源归谁、启动顺序、启动参数和结果、侧键、组件速查、内存） |
 | 界面 | `devkit/docs/round-screen-design.md`（颜色、字号、安全圆、提示、文案） |
 | 应用清单 | `devkit/docs/app-json.md` |
-| 自测、提交 | `devkit/docs/checklist.md`、`devkit/docs/from-idea-to-store.md` |
+| 流程、自测、提交 | `devkit/AGENTS.md`（先读）、`devkit/docs/checklist.md` |
 | 某个组件怎么用 | `devkit/firmware/components/<组件>/include/*.h`（头文件是准的）和组件的 README |
 | 照着改的例子 | 本仓库一开始就是模板：`main/main.c` 的启动顺序、侧键、收尾都是对的 |
 
+## 流程和不能做的事
+
+从立项到上架的七步、每步交什么、提交单怎么写，见 `devkit/AGENTS.md`，照它做。开发包仓库不收 PR。
+
+### 不能做的事
+
+从 `devkit/AGENTS.md` 第 2 节原样抄来，两边一字不差（导出开发包时会核）：
+
+1. 不改 `devkit/` 下的任何文件，包括公共组件；缺什么开「需求」单。
+2. 不碰签名：不找、不要、不生成发布密钥，不自己打签名包。签名只在 Tikpal 的发布机上做。
+3. 不在公开单子、提交说明、代码里写账号、邮箱、手机号、设备编号、令牌。日志用 `./kit logs`、`./kit info` 出来的，设备编号已经抹掉了。
+4. 版本号只往上加：每次提交都比上一次大；USB 写进测试机的版本也不能比应用市场上的低。不然夜里自动更新会把它换掉。
+5. 立项单回复以前，不开始要云能力的开发。不要云能力的可以先写。
+6. 不给这个仓库开 PR。
+7. 不擦整片 Flash，不写位置 1（主固件）和恢复器，只用 `./kit install --slot 2|3`。
+8. 不写死服务器地址和密钥；云能力只走开发包的接口。
+
 ## 硬规则
 
-1. **`devkit/` 只读。** 它是开发包（git 子模块），钉在一个版本上。不改、不复制一份改。组件缺什么，记下来告诉用户，由 Yaykit 做进下一版开发包。
+1. **`devkit/` 只读。** 它是开发包（git 子模块），钉在一个版本上。不改、不复制一份改。组件缺什么，记下来告诉用户，在开发包仓库开「需求」单，由 Tikpal 做进下一版开发包。
 2. **不擦圆屏。** 只用 `./kit install --slot 2|3` 写一个位置；不用 esptool 整片写、不擦 Flash，不碰位置 1（Yay）和恢复器。
 3. **`yk_app_start()` 是 NVS 之后第一个调用**；画好主界面、控制台起来以后 `yk_app_ready()`。
 4. **侧键**：用 `yk_app_on_key()`，`yk_key_init` 开 `delay_tap`；双击留给系统（应用环）；有自己的语音对话就设 `talks`。不轮询 GPIO0。

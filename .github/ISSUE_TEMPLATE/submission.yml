@@ -1,5 +1,5 @@
 name: 提交应用
-description: 自测过的一版应用，交给 Yaykit 审核、真机测、签名上架
+description: 自测过的一版应用，交给 Tikpal 审核、真机测、签名上架
 title: "提交：<slug> <版本>"
 labels: [submission]
 body:

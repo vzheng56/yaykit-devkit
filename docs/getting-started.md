@@ -37,7 +37,7 @@ cd my-timer
 | `test/run.sh` | 主机测试：在电脑上测 `counter.c` |
 | `devkit/` | 开发包（git 子模块），钉在建应用时的版本，只读 |
 | `kit` | 这个应用的 `kit` 命令 |
-| `CLAUDE.md`、`.claude/skills/yaykit-app/` | 给 Claude Code 看的规矩和做法 |
+| `CLAUDE.md`、`.claude/skills/tikpal-app/` | 给 Claude Code 看的规矩和做法 |
 
 在 GitHub 上建一个空仓库，推上去。仓库可以公开；私有的话，把 `vzheng56` 加成协作者，我们审核时要读它：
 

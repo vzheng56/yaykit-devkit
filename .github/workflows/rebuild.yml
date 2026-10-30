@@ -1,6 +1,6 @@
 # A colleague's app rebuilt for the review (docs: from-idea-to-store.md 5), on GitHub's machines in ESP-IDF 5.5.5's
 # container: the app at the submitted commit with the official kit its devkit/ pins, ./kit build --release and
-# ./kit check, the release build uploaded. Yaykit downloads it and signs the image as bytes on its release machine,
+# ./kit check, the release build uploaded. Tikpal downloads it and signs the image as bytes on its release machine,
 # which never builds anyone's code. Run by the kit's maintainers (workflow_dispatch).
 name: Rebuild
 on:
@@ -22,7 +22,9 @@ jobs:
     env:
       REPO: ${{ inputs.repository }}
       COMMIT: ${{ inputs.commit }}
-      KIT_URL: https://github.com/vzheng56/yaykit-devkit
+      # The kit, by its name since 1.4 and by its old one (GitHub forwards it; apps made before keep it in .gitmodules).
+      KIT_URL: https://github.com/vzheng56/tikpal-devkit
+      KIT_URL_OLD: https://github.com/vzheng56/yaykit-devkit
     steps:
       - name: The app at that commit, with the official kit at a version
         shell: bash
@@ -35,7 +37,7 @@ jobs:
           git clone --quiet --no-checkout "$REPO" /build/app
           git -C /build/app -c advice.detachedHead=false checkout --quiet "$COMMIT"
           url=$(git -C /build/app config -f .gitmodules submodule.devkit.url || true)
-          [ "${url%.git}" = "$KIT_URL" ] || { echo "::error::devkit/ is $url, not $KIT_URL"; exit 1; }
+          [ "${url%.git}" = "$KIT_URL" ] || [ "${url%.git}" = "$KIT_URL_OLD" ] || { echo "::error::devkit/ is $url, not $KIT_URL"; exit 1; }
           git -C /build/app submodule --quiet update --init devkit
           git -C /build/app/devkit fetch --quiet --tags origin
           git -C /build/app/devkit describe --tags --exact-match >/build/kit-tag
