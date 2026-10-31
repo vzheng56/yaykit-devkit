@@ -2,6 +2,11 @@
 # container: the app at the submitted commit with the official kit its devkit/ pins, ./kit build --release and
 # ./kit check, the release build uploaded. Tikpal downloads it and signs the image as bytes on its release machine,
 # which never builds anyone's code. Run by the kit's maintainers (workflow_dispatch).
+# Apps in a private repository (the colleagues' are under Spatial-Therapy-Inc) are read with this repository's
+# APP_READ_TOKEN secret, a fine-grained token with read-only Contents and Metadata. Only the step that clones the app
+# has it (the build runs the app's own code), and only that clone and checkout send it, as a header on git's command
+# line: never in a URL, .git/config, the log or the artifact. Without it, public repositories clone as before; the kit
+# (devkit/) is public and is fetched without it.
 name: Rebuild
 on:
   workflow_dispatch:
@@ -28,14 +33,24 @@ jobs:
     steps:
       - name: The app at that commit, with the official kit at a version
         shell: bash
+        env:
+          APP_TOKEN: ${{ secrets.APP_READ_TOKEN }}
         run: |
           set -euo pipefail
           [[ "$REPO" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::repository is https://github.com/<owner>/<repo>"; exit 1; }
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit is 40 hex digits"; exit 1; }
           git config --global --add safe.directory '*'
           mkdir -p /build
-          git clone --quiet --no-checkout "$REPO" /build/app
-          git -C /build/app -c advice.detachedHead=false checkout --quiet "$COMMIT"
+          app_git() {
+            if [ -n "${APP_TOKEN:-}" ]; then
+              git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$APP_TOKEN" | base64 | tr -d '\n')" "$@"
+            else
+              git "$@"
+            fi
+          }
+          app_git clone --quiet --no-checkout "$REPO" /build/app
+          app_git -C /build/app -c advice.detachedHead=false checkout --quiet "$COMMIT"
+          unset APP_TOKEN
           url=$(git -C /build/app config -f .gitmodules submodule.devkit.url || true)
           [ "${url%.git}" = "$KIT_URL" ] || [ "${url%.git}" = "$KIT_URL_OLD" ] || { echo "::error::devkit/ is $url, not $KIT_URL"; exit 1; }
           git -C /build/app submodule --quiet update --init devkit

@@ -3,13 +3,15 @@
 
   check_app.py <kit> <app>
 
-The app's manifest (the main rules of Tikpal's contract; the review checks it against the contract itself), its version
-and project name, the kit untouched at a version, everything committed, the release build there and of this version,
-without development commands and at most 3.5 MB, the host tests, and nothing in the repository that looks like a key,
-a token or a round screen's id. Standard library only: it runs before ESP-IDF is installed too.
+The app's manifest (the main rules of Tikpal's contract, and its `records` rule for rule; the review checks it against
+the contract itself), its version and project name, the kit untouched at a version, everything committed, the release
+build there and of this version, without development commands and at most 3.5 MB, the host tests, and nothing in the
+repository that looks like a key, a token or a round screen's id. Standard library only: it runs before ESP-IDF is
+installed too.
 """
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -36,6 +38,28 @@ SECRETS = [
     (re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])"), "圆屏的 USB 序列号"),
 ]
 
+# `records` (what 动态 keeps) as Tikpal's contract has it, rule for rule: the review packs an app only if the contract
+# parses its app.json, so records that pass here pass there. The contract is packages/contracts/src/app-spec.ts in
+# Tikpal's repository: `recordKind`, `name`, `recordSchema`, `collectRule`, `milestone`, `records`, and the records
+# part of `appSpec`'s superRefine (capabilities.records and records name the same kinds, a collect rule names a
+# collection, a milestone a kind, an ephemeral app keeps none); and device-api.ts `capabilityLimits.records`. When
+# those change, this changes with them: Tikpal's tests (tests/devkit.test.ts) run check_records on the contract's own
+# fixtures and hold it to the contract's answer.
+RECORD_KIND = re.compile(r"[a-z][a-z0-9.]{2,40}")  # recordKind; yk_record_kind_ok on the round screen too
+FIELD = re.compile(r"[a-z][A-Za-z0-9_]{0,40}")  # name: a record's fields, a collection, a milestone's name
+# pages.template, name@version. Spelt [-a-z0-9], not the way the slug's rule is: the kit's own consistency check reads
+# the slug's length from the first class written that way in this file.
+TEMPLATE = re.compile(r"[a-z][-a-z0-9]{1,40}@[0-9]{1,3}")
+SCHEMA_KEYS = [
+    "type", "description", "properties", "required", "additionalProperties", "items", "minItems", "maxItems",
+    "minLength", "maxLength", "minimum", "maximum", "enum", "anyOf", "default",
+]
+SCHEMA_TYPES = {"object", "array", "string", "number", "integer", "boolean", "null"}
+RECORDS_KEYS = ["ask", "kinds", "collections", "milestones", "feed", "pages"]
+RECORDS_DOC = "写法见 devkit/docs/app-json.md 的「记录 records」"
+# The kinds main/ writes, as a hint: yk_app_record("mytimer.count", ...) with the kind written out.
+RECORD_CALL = re.compile(r'\byk_app_record\(\s*"([^"\\]*)"')
+
 problems, notes = [], []
 
 
@@ -51,14 +75,14 @@ def git(cwd, *args):
     return subprocess.run(["git", "-c", "safe.directory=*", "-C", cwd, *args], capture_output=True, text=True)
 
 
-def text_of(spec, field, maxlen):
-    value = spec.get(field)
+def text_of(spec, field, maxlen, where=None):
+    value, where = spec.get(field), where or field
     if not isinstance(value, dict) or set(value) - LANGS or not {"zh", "en"} <= set(value):
-        bad(f"app.json 的 {field} 要有 zh 和 en（可以再加 ja、es-419），不能有别的语言")
+        bad(f"app.json 的 {where} 要有 zh 和 en（可以再加 ja、es-419），不能有别的语言")
         return
     for lang, s in value.items():
         if not isinstance(s, str) or not s.strip() or len(s) > maxlen:
-            bad(f"app.json 的 {field}.{lang} 要是 1–{maxlen} 个字符")
+            bad(f"app.json 的 {where}.{lang} 要是 1–{maxlen} 个字符")
 
 
 def phrases_of(where, value, items, maxlen):
@@ -68,6 +92,266 @@ def phrases_of(where, value, items, maxlen):
     for lang, lst in value.items():
         if not isinstance(lst, list) or len(lst) > items or any(not isinstance(s, str) or not s or len(s) > maxlen for s in lst):
             bad(f"app.json 的 {where}.{lang} 最多 {items} 句，每句 1–{maxlen} 个字符")
+
+
+def is_number(v):
+    # JSON numbers as zod's z.number() takes them: not true/false (bool is an int in Python), nothing infinite.
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def is_int(v, low=None, high=None):
+    # z.number().int(): a safe integer (|v| < 2^53); 3.0 is one too, as JavaScript reads it.
+    return (is_number(v) and v == int(v) and abs(v) <= 2**53 - 1
+            and (low is None or v >= low) and (high is None or v <= high))
+
+
+def is_field(v):
+    return isinstance(v, str) and FIELD.fullmatch(v) is not None
+
+
+def strict(where, value, known, required=()):
+    """An object with these keys and no others (the contract's .strict()); False when it is not an object at all."""
+    if not isinstance(value, dict):
+        bad(f"app.json 的 {where} 要是对象")
+        return False
+    for key in sorted(set(value) - set(known)):
+        bad(f"app.json 的 {where} 里有不认识的字段 {key}（只有 " + "、".join(known) + "）")
+    missing = [key for key in required if key not in value]
+    if missing:
+        bad(f"app.json 的 {where} 少了 " + "、".join(missing))
+    return True
+
+
+def check_schema(where, schema):
+    """recordSchema: the part of JSON Schema (2020-12) a record may use. Every object lists its fields and allows no
+    others, every array says what its items are; any keyword but these is refused."""
+    if not strict(where, schema, SCHEMA_KEYS):
+        return
+    if "type" in schema and (not isinstance(schema["type"], str) or schema["type"] not in SCHEMA_TYPES):
+        bad(f"app.json 的 {where}.type 是 " + "、".join(sorted(SCHEMA_TYPES)) + " 之一")
+    if "description" in schema and (not isinstance(schema["description"], str) or len(schema["description"]) > 200):
+        bad(f"app.json 的 {where}.description 最多 200 个字符")
+    properties = schema.get("properties")
+    if "properties" in schema:
+        if not isinstance(properties, dict):
+            bad(f"app.json 的 {where}.properties 要是对象：字段名对它的 schema")
+            properties = None
+        else:
+            for field, sub in properties.items():
+                if not is_field(field):
+                    bad(f"app.json 的 {where}.properties 的字段名 {field} 要小写字母开头，只用字母、数字、下划线，最长 41 个字符")
+                check_schema(f"{where}.properties.{field}", sub)
+    if "required" in schema:
+        required = schema["required"]
+        if not isinstance(required, list) or not all(is_field(f) for f in required):
+            bad(f"app.json 的 {where}.required 要是字段名的列表")
+        else:
+            for field in required:
+                if not isinstance(properties, dict) or field not in properties:
+                    bad(f"app.json 的 {where}.required 里的 {field} 不在 properties 里")
+    if "additionalProperties" in schema and schema["additionalProperties"] is not False:
+        bad(f"app.json 的 {where}.additionalProperties 只能写 false")
+    if "items" in schema:
+        check_schema(f"{where}.items", schema["items"])
+    for key in ("minItems", "maxItems", "minLength", "maxLength"):
+        if key in schema and not is_int(schema[key], 0):
+            bad(f"app.json 的 {where}.{key} 要是不小于 0 的整数")
+    for key in ("minimum", "maximum"):
+        if key in schema and not is_number(schema[key]):
+            bad(f"app.json 的 {where}.{key} 要是数")
+    if "enum" in schema:
+        values = schema["enum"]
+        if not isinstance(values, list) or not values or not all(v is None or isinstance(v, (str, bool)) or is_number(v) for v in values):
+            bad(f"app.json 的 {where}.enum 至少一个值，每个是字符串、数、true/false 或 null")
+    if "anyOf" in schema:
+        options = schema["anyOf"]
+        if not isinstance(options, list) or not options:
+            bad(f"app.json 的 {where}.anyOf 至少一个 schema")
+        else:
+            for i, sub in enumerate(options):
+                check_schema(f"{where}.anyOf[{i}]", sub)
+    # recordSchema's superRefine. `default` takes anything.
+    if schema.get("type") == "object" and ("properties" not in schema or schema.get("additionalProperties") is not False):
+        bad(f'app.json 的 {where} 是对象：要列出 properties，并写 "additionalProperties": false')
+    if schema.get("type") == "array" and "items" not in schema:
+        bad(f"app.json 的 {where} 是数组：要写 items")
+
+
+def check_collect(where, rule, collections):
+    """collectRule: what a kept record adds to a collection (the record, or each item of its list `each`)."""
+    if not strict(where, rule, ["collection", "each", "key", "keyAs", "fields", "with"], ["collection", "key"]):
+        return
+    for key in ("collection", "each", "key"):
+        if key in rule and not is_field(rule[key]):
+            bad(f"app.json 的 {where}.{key} 要是一个字段名（小写字母开头，只用字母、数字、下划线）")
+    if "keyAs" in rule and rule["keyAs"] not in ("lower", "phrase"):
+        bad(f"app.json 的 {where}.keyAs 是 lower 或 phrase")
+    if "fields" in rule and (not isinstance(rule["fields"], list) or not rule["fields"] or not all(is_field(f) for f in rule["fields"])):
+        bad(f"app.json 的 {where}.fields 至少一个字段名")
+    if "with" in rule and (not isinstance(rule["with"], dict) or not all(is_field(k) and is_field(v) for k, v in rule["with"].items())):
+        bad(f"app.json 的 {where}.with 要是字段名对字段名")
+    # appSpec's superRefine: the collection is one of records.collections.
+    if is_field(rule.get("collection")) and rule["collection"] not in collections:
+        bad(f"app.json 的 {where}.collection 是 {rule['collection']}，records.collections 里没有这个集合")
+
+
+def check_milestone(where, m, kinds):
+    """milestone: days in a row (streak), a field summed over a kind (total), the first of each value or of `when`."""
+    if not isinstance(m, dict) or m.get("type") not in ("streak", "total", "first"):
+        bad(f"app.json 的 {where} 要有 type：streak、total 或 first")
+        return
+    if m["type"] == "streak":
+        strict(where, m, ["type", "days"], ["days"])
+        if "days" in m and not is_int(m["days"], 2, 3650):
+            bad(f"app.json 的 {where}.days 是 2–3650 的整数")
+        return
+    if m["type"] == "total":
+        strict(where, m, ["type", "kind", "field", "reach"], ["kind", "field", "reach"])
+        if "field" in m and not is_field(m["field"]):
+            bad(f"app.json 的 {where}.field 要是一个字段名")
+        if "reach" in m and not is_int(m["reach"], 1):
+            bad(f"app.json 的 {where}.reach 是正整数")
+    else:
+        strict(where, m, ["type", "kind", "by", "name", "when"], ["kind"])
+        for key in ("by", "name"):
+            if key in m and not is_field(m[key]):
+                bad(f"app.json 的 {where}.{key} 要是一个字段名")
+        when = m.get("when")
+        if "when" in m and (not isinstance(when, dict) or not all(
+                is_field(k) and (isinstance(v, (str, bool)) or is_number(v)) for k, v in when.items())):
+            bad(f"app.json 的 {where}.when 要是字段名对值（字符串、数、true/false）")
+        # The contract's refine: !!by !== !!name && !!name === !!when.
+        if bool(m.get("by")) == bool(m.get("name")) or bool(m.get("name")) != ("when" in m and m["when"] is not None):
+            bad(f"app.json 的 {where} 写 by（每个值第一次），或者写 name 加 when（第一次是这些值），只写一种")
+    kind = m.get("kind")
+    if "kind" in m and (not isinstance(kind, str) or not RECORD_KIND.fullmatch(kind)):
+        bad(f"app.json 的 {where}.kind 只用小写字母、数字和点，字母开头，3–41 个字符")
+    elif isinstance(kind, str) and kind not in kinds:
+        bad(f"app.json 的 {where}.kind 是 {kind}，records.kinds 里没有这种记录")
+
+
+def kind_names(value):
+    return [k for k in value if isinstance(k, str)] if isinstance(value, list) else []
+
+
+def check_records(spec):
+    """`records` and `capabilities.records`, as the contract has them (the comment above RECORD_KIND says where)."""
+    caps = spec.get("capabilities") if isinstance(spec.get("capabilities"), dict) else {}
+    allowed = []
+    if "records" in caps:
+        cap = caps["records"]
+        if strict("capabilities.records", cap, ["kinds"], ["kinds"]):
+            allowed = kind_names(cap.get("kinds"))
+            if "kinds" in cap and (not isinstance(cap["kinds"], list) or not cap["kinds"] or len(allowed) != len(cap["kinds"])
+                                   or not all(RECORD_KIND.fullmatch(k) for k in allowed)):
+                bad("app.json 的 capabilities.records.kinds 至少一种，每种只用小写字母、数字和点，字母开头，3–41 个字符")
+    if spec.get("ephemeral") is True and "records" in caps:
+        bad("app.json 写了 ephemeral（什么都不留），就不能有 capabilities.records")
+
+    kinds = []
+    if "records" in spec:
+        records = spec["records"]
+        if not isinstance(records, dict):
+            bad(f"app.json 的 records 要是对象，{RECORDS_DOC}")
+            records = {}
+        else:
+            unknown = sorted(set(records) - set(RECORDS_KEYS))
+            for key in unknown:
+                bad(f"app.json 的 records 里有不认识的字段 {key}（只有 " + "、".join(RECORDS_KEYS) + f"）：{RECORDS_DOC}")
+            missing = [key for key in ("ask", "kinds", "feed", "pages") if key not in records]
+            if missing:
+                bad("app.json 的 records 少了 " + "、".join(missing) + ("" if unknown else f"：{RECORDS_DOC}"))
+        if "ask" in records:
+            text_of(records, "ask", 400, "records.ask")
+
+        collections = set()
+        if "collections" in records:
+            listed = records["collections"]
+            if not isinstance(listed, list) or len(listed) > 8:
+                bad("app.json 的 records.collections 最多 8 个集合")
+                listed = []
+            for i, c in enumerate(listed):
+                where = f"records.collections[{i}]"
+                if not strict(where, c, ["name", "title", "unit", "every"], ["name", "title", "unit"]):
+                    continue
+                if is_field(c.get("name")):
+                    collections.add(c["name"])
+                elif "name" in c:
+                    bad(f"app.json 的 {where}.name 要小写字母开头，只用字母、数字、下划线")
+                for key in ("title", "unit"):
+                    if key in c:
+                        text_of(c, key, 20, f"{where}.{key}")
+                if "every" in c and not is_int(c["every"], 1):
+                    bad(f"app.json 的 {where}.every 是正整数")
+
+        entries = records.get("kinds")
+        if "kinds" in records and (not isinstance(entries, list) or not 1 <= len(entries) <= 16):
+            bad("app.json 的 records.kinds 是 1–16 种记录的列表")
+        for i, k in enumerate(entries if isinstance(entries, list) else []):
+            where = f"records.kinds[{i}]"
+            if not strict(where, k, ["kind", "schema", "noMemory", "collect"], ["kind", "schema"]):
+                continue
+            if isinstance(k.get("kind"), str):
+                kinds.append(k["kind"])
+            if "kind" in k and (not isinstance(k["kind"], str) or not RECORD_KIND.fullmatch(k["kind"])):
+                bad(f"app.json 的 {where}.kind 只用小写字母、数字和点，字母开头，3–41 个字符，比如 mytimer.count")
+            if "schema" in k:
+                check_schema(f"{where}.schema", k["schema"])
+                if not isinstance(k["schema"], dict) or k["schema"].get("type") != "object":
+                    bad(f'app.json 的 {where}.schema 要写 "type": "object"：一条记录是一个对象')
+            if "noMemory" in k and k["noMemory"] is not True:
+                bad(f"app.json 的 {where}.noMemory 只能写 true（不想让 Yay 的记忆读这种记录时写），不要就别写")
+            if "collect" in k:
+                rules = k["collect"]
+                if not isinstance(rules, list) or not 1 <= len(rules) <= 8:
+                    bad(f"app.json 的 {where}.collect 是 1–8 条")
+                else:
+                    for j, rule in enumerate(rules):
+                        check_collect(f"{where}.collect[{j}]", rule, collections)
+
+        if "milestones" in records:
+            listed = records["milestones"]
+            if not isinstance(listed, list) or len(listed) > 16:
+                bad("app.json 的 records.milestones 最多 16 个")
+                listed = []
+            for i, m in enumerate(listed):
+                check_milestone(f"records.milestones[{i}]", m, kinds)
+
+        if "feed" in records and strict("records.feed", records["feed"], ["cadence", "feedDays"], ["cadence", "feedDays"]):
+            feed = records["feed"]
+            if "cadence" in feed and feed["cadence"] not in ("daily", "weekly", "session"):
+                bad("app.json 的 records.feed.cadence 是 daily（每天早上）、weekly（每周一）或 session（用完一次）")
+            if "feedDays" in feed and not is_int(feed["feedDays"], 1, 366):
+                bad("app.json 的 records.feed.feedDays 是 1–366 的整数")
+        if "pages" in records and strict("records.pages", records["pages"], ["template"], ["template"]):
+            template = records["pages"].get("template")
+            if "template" in records["pages"] and (not isinstance(template, str) or not TEMPLATE.fullmatch(template)):
+                bad("app.json 的 records.pages.template 写成 名字@版本（比如 mytimer@1），用我们立项时给的")
+
+    # appSpec's superRefine: the kinds the round screen may write (capabilities.records) are the kinds 动态 knows
+    # (records.kinds), compared as the contract does: as many, and each allowed one among them.
+    if len(allowed) != len(kinds) or any(k not in kinds for k in allowed):
+        bad("app.json 的 capabilities.records.kinds（" + ("、".join(allowed) or "没写") + "）和 records.kinds（"
+            + ("、".join(kinds) or "没写") + "）要是同样几种：圆屏只能写前者开了的，「动态」只收后者有 schema 的")
+
+
+def record_hints(spec, app):
+    """A hint, never a problem: kinds main/ writes with yk_app_record("<kind>", ...) that records.kinds does not
+    declare. The server takes no record of a kind it was not given (the kit's template writes one, <prefix>.count)."""
+    records = spec.get("records") if isinstance(spec.get("records"), dict) else {}
+    declared = {k.get("kind") for k in records.get("kinds") or [] if isinstance(k, dict) and isinstance(k.get("kind"), str)}
+    seen = set()
+    for root, dirs, files in os.walk(os.path.join(app, "main")):
+        dirs.sort()
+        for name in sorted(f for f in files if f.endswith(".c")):
+            path = os.path.join(root, name)
+            for n, line in enumerate(open(path, encoding="utf-8", errors="replace"), 1):
+                for kind in RECORD_CALL.findall(line):
+                    if kind not in declared and kind not in seen:
+                        seen.add(kind)
+                        notes.append(f"提示：{os.path.relpath(path, app)}:{n} 用 yk_app_record 写 {kind}，app.json 的 records 里没有这种，服务端不收。"
+                                     "要留进「动态」，照 devkit/docs/app-json.md 的「记录 records」补上 records 和 capabilities.records，"
+                                     "立项时跟我们定；不要就删掉这句")
 
 
 def check_manifest(spec, kit):
@@ -102,7 +386,7 @@ def check_manifest(spec, kit):
         if not isinstance(launch, dict) or set(launch) - {"summary", "examples", "params"}:
             bad("app.json 的 launch 只有 summary、examples、params")
         else:
-            text_of(launch, "summary", 300)
+            text_of(launch, "summary", 300, "launch.summary")
             phrases_of("launch.examples", launch.get("examples"), 12, 80)
             for name, p in (launch.get("params") or {}).items():
                 if not isinstance(p, dict) or p.get("type") not in {"string", "number", "boolean"} or not p.get("description"):
@@ -115,6 +399,7 @@ def check_manifest(spec, kit):
         bad("app.json 的 audience 是 kids、adults 或 all")
     if spec.get("pricing") != {"kind": "free"}:
         bad('app.json 的 pricing 现在只能是 {"kind": "free"}')
+    check_records(spec)
 
 
 def main():
@@ -126,6 +411,7 @@ def main():
         print(f"✗ app.json 读不了：{e}")
         return 1
     check_manifest(spec, kit)
+    record_hints(spec, app)
     slug, version = spec.get("slug", ""), spec.get("version", "")
 
     cmake = open(os.path.join(app, "CMakeLists.txt"), encoding="utf-8").read()
